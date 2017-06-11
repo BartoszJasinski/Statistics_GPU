@@ -3,10 +3,7 @@
 
 #include <stdio.h>
 #include <math.h>
-#include <cassert>
-#include <curand.h>
 #include <curand_kernel.h>
-#include <iostream>
 
 #include <thrust/device_vector.h>
 #include <thrust/transform_reduce.h>
@@ -20,15 +17,7 @@
 #include <thrust/host_vector.h>
 #include <thrust/reduce.h>
 #include <thrust/extrema.h>
-#include <thrust/iterator/zip_iterator.h>
 #include <thrust/iterator/constant_iterator.h>
-
-
-//#include "cuda.h"
-//
-//
-//
-//#include "cuda_runtime_api.h"
 
 
 #define MIN 2
@@ -56,36 +45,18 @@ __global__ void setup_kernel(curandState *state)
 }
 
 
-//__global__ void generateData(Data d_data, int data_length)
-//{
-//	int idx = threadIdx.x + blockDim.x * blockIdx.x;
-//	
-//	for(int i = 0; i < data_length; i++)
-//	{
-//		float myrandf = curand_uniform(curandstate + idx);
-//		myrandf *= (max_rand_int[idx] - min_rand_int[idx] + 0.999999);
-//		myrandf += min_rand_int[idx];
-//		int myrand = (int)truncf(myrandf);
-//
-////		assert(myrand <= max_rand_int[idx]);
-////		assert(myrand >= min_rand_int[idx]);
-//		result[myrand - min_rand_int[idx]]++;
-//		
-//	}
-//}
-
-void print_elapsed(clock_t start, clock_t stop)
+void printElapsed(clock_t start, clock_t stop)
 {
 	double elapsed = ((double)(stop - start)) / CLOCKS_PER_SEC;
 	printf("Elapsed time: %.3fs\n", elapsed);
 }
 
-int random_float(int range)
+int randomFloat(int range)
 {
 	return rand() % range;
 }
 
-void array_print(float *arr, int length)
+void printArray(float *arr, int length)
 {
 	int i;
 	for (i = 0; i < length; ++i) {
@@ -107,8 +78,6 @@ __global__ void generate_kernel(curandState *my_curandstate, const unsigned int 
 		myrandf += min_rand_int[idx];
 		int myrand = (int)truncf(myrandf);
 
-//		assert(myrand <= max_rand_int[idx]);
-//		assert(myrand >= min_rand_int[idx]);
 		result[myrand - min_rand_int[idx]]++;
 		
 	}
@@ -210,51 +179,6 @@ __host__ void calculateStatistics(device_vector<int> d_data, int range)
 	printf("Mean = %f Variance = %f Standard Deviation = %f Median = %f Mode = %f", mean, variance, std_dv, median, mode);
 }
 
-
-
-
-/*__host__ void generateData(int *arr, int length, int range)
-{
-	srand(time(NULL));
-	int i;
-	for (i = 0; i < length; ++i)
-		arr[i] = random_float(range);
-}
-
-int main()
-{
-	clock_t start0 = clock();
-	
-	int length = 1000000;
-	int *h_data = new int[length], *d_data;
-	int range = 1000;
-	generateData(h_data, length, range);
-	thrust::sort(h_data, h_data + length);
-	cudaMalloc(&d_data, length * sizeof(int));
-	cudaMemcpy(d_data, h_data, length * sizeof(int), cudaMemcpyHostToDevice);
-
-	int *d_count_values;
-	cudaMalloc(&d_count_values, range * sizeof(int));
-	cudaMemset(d_count_values, 0, range * sizeof(int));
-	thrust::device_vector< int > iVec(h_data, h_data + length);
-	long long sum = thrust::reduce(iVec.begin(), iVec.end(), 0, thrust::plus<int>());
-	float variance = thrust::transform_reduce(
-		iVec.cbegin(),
-		iVec.cend(),
-		varianceshifteop((float)sum / (float)length),
-		0.0f,
-		thrust::plus<float>()) / (iVec.size() - 1);
-	calculateStatistics << <1, 1 >> >(d_data, length, d_count_values, range, sum, variance);
-	cudaDeviceSynchronize();
-
-	clock_t stop0 = clock();
-	print_elapsed(start0, stop0);
-
-
-	return 0;
-}*/
-
-
 struct parallel_random_generator
 {
 	__host__ __device__
@@ -265,36 +189,6 @@ struct parallel_random_generator
 		return rng();
 	}
 };
-
-/*
-
-int main(void)
-{
-	int N = 256;
-
-	// device storage for the random numbers
-	thrust::device_vector<int> numbers(N);
-
-	// a sequence counting up from 0
-	thrust::counting_iterator<int> index_sequence_begin(0);
-
-	// transform the range [0,1,2,...N]
-	// to a range of random numbers
-	thrust::transform(index_sequence_begin,
-		index_sequence_begin + N,
-		numbers.begin(),
-		parallel_random_generator());
-
-	// print out the random numbers
-	for (int i = 0; i < N; ++i)
-	{
-		std::cout << numbers[i] << " ";
-	}
-	std::cout << std::endl;
-
-	return 0;
-}
-*/
 
 
 __host__ thrust::device_vector<int> generateData(int length, int range)
@@ -312,20 +206,137 @@ __host__ thrust::device_vector<int> generateData(int length, int range)
 }
 
 
+
+__device__ float calculateMean(long long sum, int length)
+{
+	return (float)sum / (float)length;
+}
+
+__device__ float calculateVariance(float mean)
+{
+
+
+	//	return variance;
+}
+
+__device__ float calculateStandardDerivativeCustom(float variance)
+{
+	// standard dev is just a sqrt away
+	float stdv = std::sqrtf(variance);
+
+	return stdv;
+}
+
+
+
+
+
+__device__ float calculateMedian(int *data, int length)
+{
+
+	if (length % 2)
+	{
+		return (float)(data[length / 2] + data[length / 2 + 1]) / (float)2;
+	}
+
+	return (float)data[length / 2 + 1];
+}
+
+__device__ void calculateMode(int *data, int length, int *count_values, int range, int quantity, float *result)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	for (int i = idx * quantity; i < (idx + 1) * quantity; i++)
+		count_values[data[i]]++;
+
+	__syncthreads();
+	if (idx == 0)
+	{
+		int max = 0;
+		for (int i = 0; i < range; i++)
+			if (max < count_values[i])
+			{
+				max = count_values[i];
+				*result = i;
+			}
+	}
+}
+
+__global__ void calculateStatisticsCustom(int *data, int length, int* count_values, int range, long long sum, float variance, int quantity, float* mode)
+{
+	float mean = calculateMean(sum, length);
+	float std_dv = calculateStandardDerivativeCustom(variance);
+	float median = calculateMedian(data, length);
+	calculateMode(data, length, count_values, range, quantity, mode);
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if(idx == 0)
+		printf("Mean = %f Variance = %f Standard Deviation = %f Median = %f Mode = %f", mean, variance, std_dv, median, *mode);
+}
+
+
+__host__ void generateData(int *arr, int length, int range)
+{
+	srand(time(NULL));
+	for (int i = 0; i < length; ++i)
+		arr[i] = randomFloat(range);
+}
+
 int main()
 {
-	clock_t start = clock();
-
 	int length = 1000000;
 	int range = 1000;
-	device_vector< int > d_data = generateData(length, range);
-	
-	calculateStatistics(d_data, range);
-	cudaDeviceSynchronize();
 
-	clock_t stop = clock();
-	print_elapsed(start, stop);
+	{
+		device_vector< int > d_data = generateData(length, range);
 
-	
+		clock_t start = clock();
+		calculateStatistics(d_data, range);
+		cudaDeviceSynchronize();
+		clock_t stop = clock();
+		printElapsed(start, stop);
+
+	}
+
+	cout << endl;
+
+	{
+
+		int *h_data = new int[length], *d_data;
+		generateData(h_data, length, range);
+		
+		clock_t start = clock();
+
+		thrust::sort(h_data, h_data + length);
+		cudaMalloc(&d_data, length * sizeof(int));
+		cudaMemcpy(d_data, h_data, length * sizeof(int), cudaMemcpyHostToDevice);
+
+		int *d_count_values;
+		cudaMalloc(&d_count_values, range * sizeof(int));
+		cudaMemset(d_count_values, 0, range * sizeof(int));
+		
+		float *d_mode;
+		cudaMalloc(&d_mode, sizeof(float));
+
+		thrust::device_vector< int > iVec(h_data, h_data + length);
+		long long sum = thrust::reduce(iVec.begin(), iVec.end(), 0, thrust::plus<int>());
+
+		
+		float variance = thrust::transform_reduce(
+			iVec.cbegin(),
+			iVec.cend(),
+			varianceshifteop((float)sum / (float)length),
+			0.0f,
+			thrust::plus<float>()) / (iVec.size() - 1);
+
+		int block = 1000;
+		int threads = 500;
+		calculateStatisticsCustom << <block, threads >> >(d_data, length, d_count_values, range, sum, variance, length / (block * threads), d_mode);
+		cudaDeviceSynchronize();
+
+		clock_t stop = clock();
+		printElapsed(start, stop);
+
+	}
+
+
 	return 0;
 }
