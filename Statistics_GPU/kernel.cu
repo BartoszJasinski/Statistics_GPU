@@ -1,4 +1,3 @@
-
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -14,6 +13,17 @@
 #include <thrust/functional.h>
 #include <thrust/sort.h>
 #include <ctime>
+#include <thrust/random.h>
+#include <thrust/transform.h>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/inner_product.h>
+#include <thrust/host_vector.h>
+#include <thrust/reduce.h>
+#include <thrust/extrema.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/iterator/constant_iterator.h>
+
+
 //#include "cuda.h"
 //
 //
@@ -30,6 +40,7 @@
 #define NUM_VALS THREADS*BLOCKS
 
 using namespace std;
+using namespace thrust;
 
 typedef struct Data
 {
@@ -45,7 +56,7 @@ __global__ void setup_kernel(curandState *state)
 }
 
 
-//__global__ void generateData(Data data, int data_length)
+//__global__ void generateData(Data d_data, int data_length)
 //{
 //	int idx = threadIdx.x + blockDim.x * blockIdx.x;
 //	
@@ -103,8 +114,7 @@ __global__ void generate_kernel(curandState *my_curandstate, const unsigned int 
 	}
 }
 
-struct varianceshifteop
-	: std::unary_function<float, float>
+struct varianceshifteop: std::unary_function<float, float>
 {
 	varianceshifteop(float m)
 		: mean(m)
@@ -118,21 +128,30 @@ struct varianceshifteop
 		return ::pow(data - mean, 2.0f);
 	}
 };
-__device__ float calculateMean(long long sum, int length)
+
+
+__host__ float calculateMean(device_vector<int> data)
 {
-	return (float)sum / (float)length;
+	long long sum = thrust::reduce(data.begin(), data.end(), 0, thrust::plus<int>());
+	return (float)sum / (float)data.size();
 }
 
-__device__ float calculateVariance(float mean)
+
+ float calculateVariance(device_vector<int> data, float mean)
 {
 
+	float variance = thrust::transform_reduce(
+		data.cbegin(),
+		data.cend(),
+		varianceshifteop(mean),
+		0.0f,
+		thrust::plus<float>()) / (data.size() - 1);
 
-//	return variance;
+	return variance;
 }
 
-__device__ float calculateStandardDerivative(float variance)
+__host__ float calculateStandardDerivative(float variance)
 {
-	// standard dev is just a sqrt away
 	float stdv = std::sqrtf(variance);
 
 	return stdv;
@@ -142,54 +161,59 @@ __device__ float calculateStandardDerivative(float variance)
 
 
 
-__device__ float calculateMedian(int *data, int length)
+__host__ float calculateMedian(device_vector<int> data)
 {
 	
-	if(length % 2)
+	if(data.size() % 2)
 	{
-		return (float)(data[length / 2] + data[length / 2 + 1]) / (float)2;
+		return (float)(data[data.size() / 2] + data[data.size() / 2 + 1]) / (float)2;
 	}
 	
-	return (float)data[length / 2 + 1];
+	return (float)data[data.size() / 2 + 1];
 }
 
-__device__ int calculateMode(int *data, int length, int *count_values, int range)
-{
-	for(int i = 0; i < length; i++)
-		count_values[data[i]]++;
-	
-	int max = 0, value = 0;
-	for(int i = 0; i < range; i++)
-		if(max < count_values[i])
-		{
-			max = count_values[i];
-			value = i;
-		}
 
-	return value;
+__host__ int calculateMode(device_vector<int> d_data)
+{
+	sort(d_data.begin(), d_data.end());
+
+	size_t num_unique = inner_product(d_data.begin(), d_data.end() - 1,
+		d_data.begin() + 1,
+		0,
+		thrust::plus<int>(),
+		thrust::not_equal_to<int>()) + 1;
+
+	thrust::device_vector<int> d_output_keys(num_unique);
+	thrust::device_vector<int> d_output_counts(num_unique);
+	thrust::reduce_by_key(d_data.begin(), d_data.end(),
+		thrust::constant_iterator<int>(1),
+		d_output_keys.begin(),
+		d_output_counts.begin());
+
+	thrust::device_vector<int>::iterator mode_iter;
+	mode_iter = max_element(d_output_counts.begin(), d_output_counts.end());
+
+	int mode = d_output_keys[mode_iter - d_output_counts.begin()];
+
+	return mode;
 }
 
-__global__ void calculateStatistics(int *data, int length, int* count_values, int range, long long sum, float variance)
+
+__host__ void calculateStatistics(device_vector<int> d_data, int range)
 {
-	float mean = calculateMean(sum, length);
+	float mean = calculateMean(d_data);
+	float variance = calculateVariance(d_data, mean);
 	float std_dv = calculateStandardDerivative(variance);
-	float median = calculateMedian(data, length);
-	float mode = calculateMode(data, length, count_values, range);
+	float median = calculateMedian(d_data);
+	float mode = calculateMode(d_data);
 
-//	printf("Median = %f Mode = %f", median, mode);
 	printf("Mean = %f Variance = %f Standard Deviation = %f Median = %f Mode = %f", mean, variance, std_dv, median, mode);
 }
 
-//__host__ void generateData(int *data, int length)
-//{
-//	srand(0);
-//	for (int i = 0; i < length; i++)
-//	{
-//		data[i] = rand();
-//	}
-//}
 
-__host__ void generateData(int *arr, int length, int range)
+
+
+/*__host__ void generateData(int *arr, int length, int range)
 {
 	srand(time(NULL));
 	int i;
@@ -199,6 +223,8 @@ __host__ void generateData(int *arr, int length, int range)
 
 int main()
 {
+	clock_t start0 = clock();
+	
 	int length = 1000000;
 	int *h_data = new int[length], *d_data;
 	int range = 1000;
@@ -218,8 +244,88 @@ int main()
 		varianceshifteop((float)sum / (float)length),
 		0.0f,
 		thrust::plus<float>()) / (iVec.size() - 1);
-	calculateStatistics<<<1, 1>>>(d_data, length, d_count_values, range, sum, variance);
+	calculateStatistics << <1, 1 >> >(d_data, length, d_count_values, range, sum, variance);
 	cudaDeviceSynchronize();
 
+	clock_t stop0 = clock();
+	print_elapsed(start0, stop0);
+
+
+	return 0;
+}*/
+
+
+struct parallel_random_generator
+{
+	__host__ __device__
+		unsigned int operator()(const unsigned int n) const
+	{
+		default_random_engine rng;
+		rng.discard(n);
+		return rng();
+	}
+};
+
+/*
+
+int main(void)
+{
+	int N = 256;
+
+	// device storage for the random numbers
+	thrust::device_vector<int> numbers(N);
+
+	// a sequence counting up from 0
+	thrust::counting_iterator<int> index_sequence_begin(0);
+
+	// transform the range [0,1,2,...N]
+	// to a range of random numbers
+	thrust::transform(index_sequence_begin,
+		index_sequence_begin + N,
+		numbers.begin(),
+		parallel_random_generator());
+
+	// print out the random numbers
+	for (int i = 0; i < N; ++i)
+	{
+		std::cout << numbers[i] << " ";
+	}
+	std::cout << std::endl;
+
+	return 0;
+}
+*/
+
+
+__host__ thrust::device_vector<int> generateData(int length, int range)
+{
+	device_vector<int> numbers(length);
+
+	counting_iterator<int> index_sequence_begin(0);
+
+	transform(index_sequence_begin,
+		index_sequence_begin + length,
+		numbers.begin(),
+		parallel_random_generator());
+
+	return numbers;
+}
+
+
+int main()
+{
+	clock_t start = clock();
+
+	int length = 1000000;
+	int range = 1000;
+	device_vector< int > d_data = generateData(length, range);
+	
+	calculateStatistics(d_data, range);
+	cudaDeviceSynchronize();
+
+	clock_t stop = clock();
+	print_elapsed(start, stop);
+
+	
 	return 0;
 }
