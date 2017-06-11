@@ -11,8 +11,6 @@
 #include <thrust/sort.h>
 #include <ctime>
 #include <thrust/random.h>
-#include <thrust/transform.h>
-#include <thrust/iterator/counting_iterator.h>
 #include <thrust/inner_product.h>
 #include <thrust/host_vector.h>
 #include <thrust/reduce.h>
@@ -178,29 +176,27 @@ __host__ void calculateStatistics(device_vector<int> d_data, int range)
 
 	printf("Mean = %f Variance = %f Standard Deviation = %f Median = %f Mode = %f", mean, variance, std_dv, median, mode);
 }
-
+/*
 struct parallel_random_generator
 {
 	__host__ __device__
 		unsigned int operator()(const unsigned int n) const
 	{
-		default_random_engine rng;
+
+		default_random_engine rng();
 		rng.discard(n);
 		return rng();
 	}
 };
+*/
 
 
 __host__ thrust::device_vector<int> generateData(int length, int range)
 {
+	srand(time(NULL));
 	device_vector<int> numbers(length);
-
-	counting_iterator<int> index_sequence_begin(0);
-
-	transform(index_sequence_begin,
-		index_sequence_begin + length,
-		numbers.begin(),
-		parallel_random_generator());
+	for (int i = 0; i < length; ++i)
+		numbers[i] = (int)randomFloat(range);
 
 	return numbers;
 }
@@ -280,10 +276,52 @@ __host__ void generateData(int *arr, int length, int range)
 		arr[i] = randomFloat(range);
 }
 
+__global__ void reduce(int *data, long long *result)
+{
+	extern __shared__ long long sh[];
+	int idx = threadIdx.x + blockDim.x * blockIdx.x;
+	unsigned int tid = threadIdx.x;
+	sh[tid] = data[idx];
+	__syncthreads();
+
+	for (unsigned int s = blockDim.x / 2; s>0; s >>= 1)
+	{
+		if (tid < s) {
+			sh[tid] += sh[tid + s];
+		}
+		__syncthreads();
+	}
+
+	if (idx == 0)
+		*result = sh[0];
+
+}
+
+
+__global__ void reduce0(int *g_idata) {
+	__shared__ int sdata[16];
+	// each thread loads one element from global to shared mem
+	unsigned int tid = threadIdx.x;
+	unsigned int i = blockIdx.x
+		*blockDim.x + threadIdx.x;
+	sdata[tid] = g_idata[i];
+	__syncthreads();
+
+	for (unsigned int s = blockDim.x / 2; s>0; s >>= 1)
+	{
+		if (tid < s) {
+			sdata[tid] += sdata[tid + s];
+		}
+		__syncthreads();
+	}
+	// write result for this block to global mem
+}
+
+
 int main()
 {
 	int length = 1000000;
-	int range = 1000;
+	int range = 10000;
 
 	{
 		device_vector< int > d_data = generateData(length, range);
@@ -317,19 +355,26 @@ int main()
 		cudaMalloc(&d_mode, sizeof(float));
 
 		thrust::device_vector< int > iVec(h_data, h_data + length);
-		long long sum = thrust::reduce(iVec.begin(), iVec.end(), 0, thrust::plus<int>());
-
+		long long *sum, *d_sum, h_sum;
+//		sum = (long long*)std::malloc(sizeof(long long));
+//		cudaMalloc(&d_sum, sizeof(long long));
+		h_sum = thrust::reduce(iVec.begin(), iVec.end(), 0, thrust::plus<int>());
+//		cout << endl << h_sum << endl;
+//		reduce << <1000, 1024, length * sizeof(long long) >> > (d_data, d_sum);
+//		cudaMemcpy(sum, d_sum, sizeof(long long), cudaMemcpyDeviceToHost);
+//		cout << endl <<*sum << endl;
+		
 		
 		float variance = thrust::transform_reduce(
 			iVec.cbegin(),
 			iVec.cend(),
-			varianceshifteop((float)sum / (float)length),
+			varianceshifteop((float)*sum / (float)length),
 			0.0f,
 			thrust::plus<float>()) / (iVec.size() - 1);
 
 		int block = 1000;
 		int threads = 500;
-		calculateStatisticsCustom << <block, threads >> >(d_data, length, d_count_values, range, sum, variance, length / (block * threads), d_mode);
+		calculateStatisticsCustom << <block, threads >> >(d_data, length, d_count_values, range, h_sum, variance, length / (block * threads), d_mode);
 		cudaDeviceSynchronize();
 
 		clock_t stop = clock();
@@ -338,5 +383,5 @@ int main()
 	}
 
 
-	return 0;
+	return EXIT_SUCCESS;
 }
